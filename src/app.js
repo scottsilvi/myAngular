@@ -1,0 +1,2 @@
+require('./myAngular');
+require('./scope');

@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mocha Test Runner</title>
+    <link rel="stylesheet" href="vendor/mocha/mocha.css">
+  </head>
+  <body>
+    <div id="mocha"></div>
+    <script src="vendor/mocha/mocha.js" type="text/javascript" charset="utf-8"></script>
+    <script src="vendor/chai/chai.js" type="text/javascript" charset="utf-8"></script>
+    <script src="vendor/sinon/lib/sinon.js" type="text/javascript" charset="utf-8"></script>
+    <script src="bundle.vendor.js" type="text/javascript" charset="utf-8"></script>
+    <script type="text/javascript" charset="utf-8">
+      var expect = chai.expect;
+      var should = chai.should();
+      mocha.setup('bdd');
+    </script>
+    <script src="bundle.test.js" type="text/javascript" charset="utf-8"></script>
+    <script>
+      if (window.mochaPhantomJS) {
+        mochaPhantomJS.run();
+      } else {
+        mocha.run();
+      }
+    </script>
+  </body>
+</html>
