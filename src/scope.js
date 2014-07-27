@@ -139,7 +139,11 @@ Scope.prototype.$watchCollection = function (watchFn, listenerFn) {
 	};
 
 	var internalListenerFn = function () {
-		listenerFn(newValue, veryOldValue, self);
+		if(firstRun) {
+			listenerFn(newValue, newValue, self);
+		} else {
+			listenerFn(newValue, veryOldValue, self);
+		}
 
 		if(trackVeryOldValue) { 
 			veryOldValue = _.clone(newValue);
