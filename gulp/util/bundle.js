@@ -1,6 +1,8 @@
 var bundleLogger = require('./bundleLogger');
 var handleErrors = require('./handleErrors');
+var connect = require('gulp-connect');
 var source = require('vinyl-source-stream');
+var util = require('gulp-util');
 var gulp = require('gulp');
 
 
@@ -22,6 +24,8 @@ module.exports = function (bundler, outputName, outputDest) {
 			.pipe(source(outputName))
 			// Specify the output destination
 			.pipe(gulp.dest(outputDest))
+			// reload
+			.pipe(global.isWatching ? connect.reload() : util.noop())
 			// Log when bundling completes!
 			.on('end', bundleLogger.end);
 	};

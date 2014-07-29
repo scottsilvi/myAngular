@@ -141,6 +141,7 @@ Scope.prototype.$watchCollection = function (watchFn, listenerFn) {
 	var internalListenerFn = function () {
 		if(firstRun) {
 			listenerFn(newValue, newValue, self);
+			firstRun = false;
 		} else {
 			listenerFn(newValue, veryOldValue, self);
 		}
