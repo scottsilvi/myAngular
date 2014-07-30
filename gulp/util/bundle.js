@@ -5,16 +5,13 @@ var source = require('vinyl-source-stream');
 var util = require('gulp-util');
 var gulp = require('gulp');
 
-
 module.exports = function (bundler, outputName, outputDest) {
-
 
 	var bundle = function () {
 		// Log when bundling starts
 		bundleLogger.start();
 
 		return bundler
-			// Enable source maps!
 			.bundle()
 			// Report compile errors
 			.on('error', handleErrors)
