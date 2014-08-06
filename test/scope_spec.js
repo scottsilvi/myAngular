@@ -607,6 +607,43 @@ describe('Scope', function () {
 			scope.$digest();
 			expect(scope.counter).to.equal(0);
 		});
+	
+		it('accepts expressions for watch functions', function () {
+			var theValue;
+
+			scope.$watch('42', function (newValue, oldValue, scope) {
+				theValue = newValue;
+			});
+			scope.$digest();
+
+			expect(theValue).to.equal(42);
+		});
+
+		it('removes constant watches after first invocation', function () {
+			scope.$watch('42', function () {});
+			scope.$digest();
+
+			expect(scope.$$watchers.length).to.equal(0);
+		});
+
+		it('accepts expressions for listener functions', function () {
+			scope.$watch('42', '"forty-two"');
+			scope.$digest();
+		});
+
+		it('accepts expressions in $apply', function () {
+			expect(scope.$eval('42')).to.equal(42);
+		});
+
+		it('accepts expressions in $eval', function () {
+			expect(scope.$apply('42')).to.equal(42);
+		});
+
+		it('accepts expressions in $evalAsync', function (done) {
+			scope.$evalAsync('42');
+			scope.$$postDigest(done);
+		});
+
 	});
 
 	describe('inheritance', function () {
@@ -1306,6 +1343,25 @@ describe('Scope', function () {
 			scope.$digest();
 
 			expect(oldValueGiven).to.deep.equal({ a: 1, b: 2 });
+		});
+
+		it('accepts expressions for $watch functions', function () {
+			var theValue;
+
+			scope.$watchCollection('[1, 2, 3]', function (newValue, oldValue, scope) {
+				theValue = newValue;
+			});
+
+			scope.$digest();
+
+			expect(theValue).to.deep.equal([1, 2, 3]);
+		});
+
+		it('accepts expressions for listener functions', function () {
+			var theValue;
+
+			scope.$watchCollection('[1, 2, 3]', '"one-two-three"');
+			scope.$digest();
 		});
 	});
 

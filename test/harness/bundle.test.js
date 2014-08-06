@@ -1070,23 +1070,161 @@ _.mixin({
 var _ = require('lodash');
 
 var ESCAPES = {'n':'\n', 'f':'\f', 'r':'\r', 't':'\t', 'v':'\v', '\'':'\'', '"':'"'};
+
 var OPERATORS = {
-	'null' : _.constant(null),
-	'true' : _.constant(true),
-	'false' : _.constant(false)
+	'null': _.constant(null),
+	'true': _.constant(true),
+	'false': _.constant(false),
+	'+': function(self, locals, a, b) {
+		a = a(self, locals);
+		b = b(self, locals);
+		if (!_.isUndefined(a)) {
+			if (!_.isUndefined(b)) {
+				return a + b;
+			} else {
+				return a;
+			}
+		}
+		return b;
+	},
+	'!': function(self, locals, a) {
+		return !a(self, locals);
+	},
+	'-': function(self, locals, a, b) {
+		a = a(self, locals);
+		b = b(self, locals);
+		return (_.isUndefined(a) ? 0 : a) - (_.isUndefined(b) ? 0 : b);
+	},
+	'*': function(self, locals, a, b) {
+		return a(self, locals) * b(self, locals);
+	},
+	'/': function(self, locals, a, b) {
+		return a(self, locals) / b(self, locals);
+	},
+	'%': function(self, locals, a, b) {
+		return a(self, locals) % b(self, locals);
+	},
+	'<': function(self, locals, a, b) {
+		return a(self, locals) < b(self, locals);
+	},
+	'>': function(self, locals, a, b) {
+		return a(self, locals) > b(self, locals);
+	},
+	'<=': function(self, locals, a, b) {
+		return a(self, locals) <= b(self, locals);
+	},
+	'>=': function(self, locals, a, b) {
+		return a(self, locals) >= b(self, locals);
+	},
+	'==': function(self, locals, a, b) {
+		return a(self, locals) == b(self, locals);
+	},
+	'!=': function(self, locals, a, b) {
+		return a(self, locals) != b(self, locals);
+	},
+	'===': function(self, locals, a, b) {
+		return a(self, locals) === b(self, locals);
+	},
+	'!==': function(self, locals, a, b) {
+		return a(self, locals) !== b(self, locals);
+	},
+	'=': _.noop,
+	'&&': function(self, locals, a, b) {
+		return a(self, locals) && b(self, locals);
+	},
+	'||': function(self, locals, a, b) {
+		return a(self, locals) || b(self, locals);
+	}
 };
 
-function parse(expr) {
-	var lexer = new Lexer();
-	var parser = new Parser(lexer);
-	return parser.parse(expr);
+var ensureSafeMemberName = function(name) {
+	if (name === 'constructor') {
+		throw 'Referencing "constructor" field in Angular expressions is disallowed!';
+	}
 };
 
-function Lexer () {
-
+var ensureSafeObject = function(obj) {
+	if (obj) {
+		if (obj.document && obj.location && obj.alert && obj.setInterval) {
+			throw 'Referencing window in Angular expressions is disallowed!';
+		} else if (obj.children && (obj.nodeName || (obj.prop && obj.attr && obj.find))) {
+			throw 'Referencing DOM nodes in Angular expressions is disallowed!';
+		} else if (obj.constructor === obj) {
+			throw "Referencing Function in Angular expressions is disallowed!";
+		}
+	}
+	return obj;
 };
 
-Lexer.prototype.lex = function (text) {
+var simpleGetterFn1 = function(key) {
+	ensureSafeMemberName(key);
+	return function(scope, locals) {
+		if (!scope) {
+			return undefined;
+		}
+		return (locals && locals.hasOwnProperty(key)) ? locals[key] : scope[key];
+	};
+};
+
+var simpleGetterFn2 = function(key1, key2) {
+	ensureSafeMemberName(key1);
+	ensureSafeMemberName(key2);
+	return function(scope, locals) {
+		if (!scope) {
+			return undefined;
+		}
+		scope = (locals && locals.hasOwnProperty(key1)) ? locals[key1] : scope[key1];
+		return scope ? scope[key2] : undefined;
+	};
+};
+
+var generatedGetterFn = function(keys) {
+	var code = '';
+	_.forEach(keys, function(key, idx) {
+		ensureSafeMemberName(key);
+		code += 'if (!scope) { return undefined; }\n';
+		if (idx === 0) {
+			code += 'scope = (locals && locals.hasOwnProperty("'+key+'")) ? locals["'+key+'"] : scope["' + key + '"];\n';
+		} else {
+			code += 'scope = scope["' + key + '"];\n';
+		}
+	});
+	code += 'return scope;\n';
+	/* jshint -W054 */
+	return new Function('scope', 'locals', code);
+	/* jshint +W054 */
+};
+
+var getterFn = _.memoize(function(ident) {
+	var pathKeys = ident.split('.');
+	if (pathKeys.length === 1) {
+		return simpleGetterFn1(pathKeys[0]);
+	} else if (pathKeys.length === 2) {
+		return simpleGetterFn2(pathKeys[0], pathKeys[1]);
+	} else {
+		return generatedGetterFn(pathKeys);
+	}
+});
+
+var setter = function(object, path, value) {
+	var keys = path.split('.');
+	while (keys.length > 1) {
+		var key = keys.shift();
+		ensureSafeMemberName(key);
+		if (!object.hasOwnProperty(key)) {
+			object[key] = {};
+		}
+		object = object[key];
+	}
+	object[keys.shift()] = value;
+	return value;
+};
+
+function Lexer() {
+
+}
+
+Lexer.prototype.lex = function(text) {
 	this.text = text;
 	this.index = 0;
 	this.ch = undefined;
@@ -1094,13 +1232,12 @@ Lexer.prototype.lex = function (text) {
 
 	while (this.index < this.text.length) {
 		this.ch = this.text.charAt(this.index);
-
 		if (this.isNumber(this.ch) ||
-			(this.ch === '.' && this.isNumber(this.peek()))) {
+					(this.is('.') && this.isNumber(this.peek()))) {
 			this.readNumber();
-		} else if (this.ch === '\'' || this.ch === '"') {
+		} else if (this.is('\'"')) {
 			this.readString(this.ch);
-		} else if (this.ch === '[' || this.ch === ']' || this.ch === ',') {
+		} else if (this.is('[],{}:.()?;')) {
 			this.tokens.push({
 				text: this.ch,
 				json: true
@@ -1111,19 +1248,63 @@ Lexer.prototype.lex = function (text) {
 		} else if (this.isWhitespace(this.ch)) {
 			this.index++;
 		} else {
-			throw 'unexpected next character: ' + this.ch;
+			var ch2 = this.ch + this.peek();
+			var ch3 = this.ch + this.peek() + this.peek(2);
+			var fn = OPERATORS[this.ch];
+			var fn2 = OPERATORS[ch2];
+			var fn3 = OPERATORS[ch3];
+			if (fn3) {
+				this.tokens.push({
+					text: ch3,
+					fn: fn3
+				});
+				this.index += 3;
+			} else if (fn2) {
+				this.tokens.push({
+					text: ch2,
+					fn: fn2
+				});
+				this.index += 2;
+			} else if (fn) {
+				this.tokens.push({
+					text: this.ch,
+					fn: fn
+				});
+				this.index++;
+			} else {
+				throw 'Unexpected next character: '+this.ch;
+			}
 		}
 	}
 
 	return this.tokens;
 };
 
-Lexer.prototype.isNumber = function (ch) {
+Lexer.prototype.is = function(chs) {
+	return chs.indexOf(this.ch) >= 0;
+};
+
+Lexer.prototype.isNumber = function(ch) {
 	return '0' <= ch && ch <= '9';
 };
 
-Lexer.prototype.readNumber = function () {
+Lexer.prototype.isExpOperator = function(ch) {
+	return ch === '-' || ch === '+' || this.isNumber(ch);
+};
+
+Lexer.prototype.isIdent = function(ch) {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+		ch === '_' || ch === '$';
+};
+
+Lexer.prototype.isWhitespace = function(ch) {
+	return (ch === ' ' || ch === '\r' || ch === '\t' ||
+		ch === '\n' || ch === '\v' || ch === '\u00A0');
+};
+
+Lexer.prototype.readNumber = function() {
 	var number = '';
+
 	while (this.index < this.text.length) {
 		var ch = this.text.charAt(this.index).toLowerCase();
 		if (ch === '.' || this.isNumber(ch)) {
@@ -1131,12 +1312,14 @@ Lexer.prototype.readNumber = function () {
 		} else {
 			var nextCh = this.peek();
 			var prevCh = number.charAt(number.length - 1);
-			if(ch === 'e' && this.isExpOperator(nextCh)) {
+			if (ch === 'e' && this.isExpOperator(nextCh)) {
 				number += ch;
-			} else if (this.isExpOperator(ch) && prevCh === 'e' && nextCh && this.isNumber(nextCh)) {
+			} else if (this.isExpOperator(ch) && prevCh === 'e' &&
+								 nextCh && this.isNumber(nextCh)) {
 				number += ch;
-			} else if (this.isExpOperator(ch) && prevCh === 'c' && (!nextCh || !this.isNumber(nextCh))) {
-				throw "Invalid Exponent";
+			} else if (this.isExpOperator(ch) && prevCh === 'e' &&
+								 (!nextCh || !this.isNumber(nextCh))) {
+				throw "Invalid exponent";
 			} else {
 				break;
 			}
@@ -1146,13 +1329,13 @@ Lexer.prototype.readNumber = function () {
 
 	number = 1 * number;
 	this.tokens.push({
-		text: number, 
+		text: number,
 		fn: _.constant(number),
 		json: true
 	});
 };
 
-Lexer.prototype.readString = function (quote) {
+Lexer.prototype.readString = function(quote) {
 	this.index++;
 	var rawString = quote;
 	var string = '';
@@ -1160,18 +1343,17 @@ Lexer.prototype.readString = function (quote) {
 	while (this.index < this.text.length) {
 		var ch = this.text.charAt(this.index);
 		rawString += ch;
-
 		if (escape) {
-			if(ch === 'u') {
+			if (ch === 'u') {
 				var hex = this.text.substring(this.index + 1, this.index + 5);
-				if(!hex.match(/[\da-f]{4}/i)) {
+				if (!hex.match(/[\da-f]{4}/i)) {
 					throw 'Invalid unicode escape';
 				}
 				this.index += 4;
 				string = String.fromCharCode(parseInt(hex, 16));
 			} else {
 				var replacement = ESCAPES[ch];
-				if(replacement) {
+				if (replacement) {
 					string += replacement;
 				} else {
 					string += ch;
@@ -1182,8 +1364,9 @@ Lexer.prototype.readString = function (quote) {
 			this.index++;
 			this.tokens.push({
 				text: rawString,
-				fn: _.constant(string), 
-				json: true
+				string: string,
+				json: true,
+				fn: _.constant(string)
 			});
 			return;
 		} else if (ch === '\\') {
@@ -1196,118 +1379,390 @@ Lexer.prototype.readString = function (quote) {
 	throw 'Unmatched quote';
 };
 
-Lexer.prototype.readIdent = function () {
+
+Lexer.prototype.readIdent = function() {
 	var text = '';
+	var start = this.index;
+	var lastDotAt;
 	while (this.index < this.text.length) {
 		var ch = this.text.charAt(this.index);
-		if(this.isIdent(ch) || this.isNumber(ch)) {
+		if (ch === '.' || this.isIdent(ch) || this.isNumber(ch)) {
+			if (ch === '.') {
+				lastDotAt = this.index;
+			}
 			text += ch;
 		} else {
 			break;
 		}
 		this.index++;
 	}
-	var token = {
-		text: text
-	};
-	if(OPERATORS.hasOwnProperty(text)) {
-		token.fn = OPERATORS[text];
-		token.json = true;
+
+	var methodName;
+	if (lastDotAt) {
+		var peekIndex = this.index;
+		while (this.isWhitespace(this.text.charAt(peekIndex))) {
+			peekIndex++;
+		}
+		if (this.text.charAt(peekIndex) === '(') {
+			methodName = text.substring(lastDotAt - start + 1);
+			text = text.substring(0, lastDotAt - start);
+		}
 	}
+
+	var token = {text: text};
+	if (OPERATORS.hasOwnProperty(text)) {
+		token.fn = OPERATORS[text];
+		token.json = OPERATORS[text];
+	} else {
+		token.fn = getterFn(text);
+		token.fn.assign = function(self, value) {
+			return setter(self, text, value);
+		};
+	}
+
 	this.tokens.push(token);
+
+	if (methodName) {
+		this.tokens.push({
+			text: '.',
+			json: false
+		});
+		this.tokens.push({
+			text: methodName,
+			fn: getterFn(methodName),
+			json: false
+		});
+	}
 };
 
-Lexer.prototype.peek = function () {
-	return this.index < this.text.length - 1 ?
-		this.text.charAt(this.index + 1) :
+
+Lexer.prototype.peek = function(n) {
+	n = n || 1;
+	return this.index + n < this.text.length ?
+		this.text.charAt(this.index + n) :
 		false;
 };
 
-Lexer.prototype.isExpOperator = function (ch) {
-	return ch === '-' || ch === '+' || this.isNumber(ch);
+Lexer.prototype.is = function(chs) {
+	return chs.indexOf(this.ch) >= 0;
 };
 
-Lexer.prototype.isIdent = function (ch) {
-	return (ch >= 'a' && ch <= 'z')  || (ch >= 'A' && ch <= 'Z') || ch === '_' || ch === '$';
-};
-
-Lexer.prototype.isWhitespace = function (ch) {
-	return (ch === ' ' || ch === '\r' || ch === '\t' || ch === '\n' || ch === '\v' || ch === '\u00A0');
-};
 
 function Parser(lexer) {
 	this.lexer = lexer;
-};
+}
 
-Parser.prototype.parse = function (text) {
+Parser.ZERO = _.extend(_.constant(0), {constant: true});
+
+Parser.prototype.parse = function(text) {
 	this.tokens = this.lexer.lex(text);
-	return this.primary();
+	return this.statements();
 };
 
-Parser.prototype.primary = function () {
+Parser.prototype.statements = function() {
+	var statements = [];
+	do {
+		statements.push(this.assignment());
+	} while (this.expect(';'));
+
+	if(statements.length === 1) {
+		return statements[0];
+	} else {
+		return function (self, locals) {
+			var value;
+			_.forEach(statements, function (statement) {
+				value = statement(self, locals);
+			});
+			return value;
+		}
+	}
+};
+
+Parser.prototype.assignment = function() {
+	var left = this.ternary();
+	if (this.expect('=')) {
+		if (!left.assign) {
+			throw 'Implies assignment but cannot be assigned to';
+		}
+		var right = this.ternary();
+		return function(scope, locals) {
+			return left.assign(scope, right(scope, locals), locals);
+		};
+	}
+	return left;
+};
+
+Parser.prototype.ternary = function() {
+	var left = this.logicalOR();
+	if (this.expect('?')) {
+		var middle = this.ternary();
+		this.consume(':');
+		var right = this.ternary();
+		var ternaryFn = function(self, locals) {
+			return left(self, locals) ? middle(self, locals) : right(self, locals);
+		};
+		ternaryFn.constant = left.constant && middle.constant && right.constant;
+		return ternaryFn;
+	} else {
+		return left;
+	}
+};
+
+Parser.prototype.logicalOR = function() {
+	var left = this.logicalAND();
+	var operator;
+	while ((operator = this.expect('||'))) {
+		left = this.binaryFn(left, operator.fn, this.logicalOR());
+	}
+	return left;
+};
+Parser.prototype.logicalAND = function() {
+	var left = this.equality();
+	var operator;
+	while ((operator = this.expect('&&'))) {
+		left = this.binaryFn(left, operator.fn, this.equality());
+	}
+	return left;
+};
+
+Parser.prototype.equality = function() {
+	var left = this.relational();
+	var operator;
+	while ((operator = this.expect('==', '!=', '===', '!=='))) {
+		left = this.binaryFn(left, operator.fn, this.relational());
+	}
+	return left;
+};
+
+Parser.prototype.relational = function() {
+	var left = this.additive();
+	var operator;
+	while ((operator = this.expect('<', '>', '<=', '>='))) {
+		left = this.binaryFn(left, operator.fn, this.additive());
+	}
+	return left;
+};
+
+Parser.prototype.additive = function() {
+	var left = this.multiplicative();
+	var operator;
+	while ((operator = this.expect('+', '-'))) {
+		left = this.binaryFn(left, operator.fn, this.multiplicative());
+	}
+	return left;
+};
+
+Parser.prototype.multiplicative = function() {
+	var left = this.unary();
+	var operator;
+	while ((operator = this.expect('*', '/', '%'))) {
+		left = this.binaryFn(left, operator.fn, this.unary());
+	}
+	return left;
+};
+
+Parser.prototype.unary = function() {
+	var parser = this;
+	var operator;
+	if (this.expect('+')) {
+		return this.primary();
+	} else if ((operator = this.expect('!'))) {
+		var operand = parser.unary();
+		var unaryFn = function(self, locals) {
+			return operator.fn(self, locals, operand);
+		};
+		unaryFn.constant = operand.constant;
+		return unaryFn;
+	} else if ((operator = this.expect('-'))) {
+		return this.binaryFn(Parser.ZERO, operator.fn, parser.unary());
+	} else {
+		return this.primary();
+	}
+};
+
+
+Parser.prototype.primary = function() {
 	var primary;
-	if(this.expect('[')) {
+	if (this.expect('(')) {
+		primary = this.assignment();
+		this.consume(')');
+	} else if (this.expect('[')) {
 		primary = this.arrayDeclaration();
+	} else if (this.expect('{')) {
+		primary = this.object();
 	} else {
 		var token = this.expect();
-		var primary = token.fn;
+		primary = token.fn;
 		if (token.json) {
 			primary.constant = true;
 			primary.literal = true;
 		}
 	}
+
+	var next;
+	var context;
+	while ((next = this.expect('[', '.', '('))) {
+		 if (next.text === '[') {
+			context = primary;
+			primary = this.objectIndex(primary);
+		} else if (next.text === '.') {
+			context = primary;
+			primary = this.fieldAccess(primary);
+		} else if (next.text === '(') {
+			primary = this.functionCall(primary, context);
+			context = undefined;
+		}
+	}
 	return primary;
 };
 
-Parser.prototype.expect = function (e) {
-	var token = this.peek(e);
-	if(token) {
-		return this.tokens.shift();
-	}
+Parser.prototype.binaryFn = function(left, op, right) {
+	var fn = function(self, locals) {
+		return op(self, locals, left, right);
+	};
+	fn.constant = left.constant && right.constant;
+	return fn;
 };
 
-Parser.prototype.arrayDeclaration = function () {
+Parser.prototype.arrayDeclaration = function() {
 	var elementFns = [];
-	if(!this.peek(']')) {
+	if (!this.peek(']')) {
 		do {
-			if(this.peek(']')) {
+			if (this.peek(']')) {
 				break;
 			}
-			elementFns.push(this.primary());
+			elementFns.push(this.assignment());
 		} while (this.expect(','));
 	}
 	this.consume(']');
-	var arrayFn = function () {
-		return _.map(elementFns, function (elementFn) {
-			return elementFn();
+	var arrayFn = function(scope, locals) {
+		var elements = _.map(elementFns, function(elementFn) {
+			return elementFn(scope, locals);
 		});
-	}
+		return elements;
+	};
 	arrayFn.literal = true;
-	arrayFn.constant = true;
+	arrayFn.constant = _.every(elementFns, 'constant');
 	return arrayFn;
 };
 
-Parser.prototype.consume = function (e) {
-	if(!this.expect(e)) {
-		throw 'Unexpected. Expecting ' + e;
+Parser.prototype.object = function() {
+	var keyValues = [];
+	if (!this.peek('}')) {
+		do {
+			var keyToken = this.expect();
+			this.consume(':');
+			var valueExpression = this.assignment();
+			keyValues.push({key: keyToken.string || keyToken.text, value: valueExpression});
+		} while (this.expect(','));
 	}
+	this.consume('}');
+	var objectFn = function(scope, locals) {
+		var object = {};
+		_.forEach(keyValues, function(kv) {
+			object[kv.key] = kv.value(scope, locals);
+		});
+		return object;
+	};
+	objectFn.literal = true;
+	objectFn.constant = _(keyValues).pluck('value').every('constant');
+	return objectFn;
 };
 
-Parser.prototype.peek = function (e) {
+
+Parser.prototype.objectIndex = function(objFn) {
+	var indexFn = this.primary();
+	this.consume(']');
+	var objectIndexFn = function(scope, locals) {
+		var obj = objFn(scope, locals);
+		var index = indexFn(scope, locals);
+		return ensureSafeObject(obj[index]);
+	};
+	objectIndexFn.assign = function(self, value, locals) {
+		var obj = ensureSafeObject(objFn(self, locals));
+		var index = indexFn(self, locals);
+		return (obj[index] = value);
+	};
+	return objectIndexFn;
+};
+
+Parser.prototype.fieldAccess = function(objFn) {
+	var token = this.expect();
+	var getter = token.fn;
+	var fieldAccessFn = function(scope, locals) {
+		var obj = objFn(scope, locals);
+		return getter(obj);
+	};
+	fieldAccessFn.assign = function(self, value, locals) {
+		var obj = objFn(self, locals);
+		return setter(obj, token.text, value);
+	};
+	return fieldAccessFn;
+};
+
+
+Parser.prototype.functionCall = function(fnFn, contextFn) {
+	var argFns = [];
+	if (!this.peek(')')) {
+		do {
+			argFns.push(this.primary());
+		} while (this.expect(','));
+	}
+	this.consume(')');
+	return function(scope, locals) {
+		var context = ensureSafeObject(contextFn ? contextFn(scope, locals) : scope);
+		var fn = ensureSafeObject(fnFn(scope, locals));
+		var args = _.map(argFns, function(argFn) { return argFn(scope, locals); });
+		return ensureSafeObject(fn.apply(context, args));
+	};
+};
+
+Parser.prototype.peek = function(e1, e2, e3, e4) {
 	if (this.tokens.length > 0) {
 		var text = this.tokens[0].text;
-		if (text === e || !e) {
+		if (text === e1 || text === e2 || text === e3 || text === e4 ||
+				(!e1 && !e2 && !e3 && !e4)) {
 			return this.tokens[0];
 		}
 	}
 };
+
+Parser.prototype.expect = function(e1, e2, e3, e4) {
+	var token = this.peek(e1, e2, e3, e4);
+	if (token) {
+		return this.tokens.shift();
+	}
+};
+
+Parser.prototype.consume = function(e) {
+	if (!this.expect(e)) {
+		throw 'Unexpected. Expecting '+e;
+	}
+};
+
+
+function parse(expr) {
+	switch (typeof expr) {
+		case 'string':
+			var lexer = new Lexer();
+			var parser = new Parser(lexer);
+			return parser.parse(expr);
+		case 'function':
+			return expr;
+		default:
+			return _.noop;
+	}
+}
+
 module.exports = parse;
 
 },{"lodash":"K2RcUv"}],8:[function(require,module,exports){
 /* jshint globalstrict: true */
+/* global parse: false */
 'use strict';
 
 var _ = require('lodash');
+var parse = require('./parse');
 
 var initWatchVal = function () {};
 
@@ -1359,12 +1814,27 @@ Scope.prototype.$destroy = function () {
 
 Scope.prototype.$watch = function (watchFn, listenerFn, valueEq) {
 	var self = this;
+
+	watchFn = parse(watchFn);
+	listenerFn = parse(listenerFn);
+
 	var watcher = {
 		watchFn: watchFn,
-		listenerFn: listenerFn || function () {},
+		listenerFn: listenerFn,
 		valueEq: !!valueEq,
 		last: initWatchVal
 	};
+
+	if(watchFn.constant) {
+		watcher.listenerFn = function (newValue, oldValue, scope) {
+			listenerFn(newValue, oldValue, scope);
+			var index = self.$$watchers.indexOf(watcher);
+			if (index >= 0) {
+				self.$$watchers.splice(index, 1);
+			}
+		};
+	}
+
 	this.$$watchers.unshift(watcher);
 	this.$$root.$$lastDirtyWatch = null;
 	return function () {
@@ -1384,6 +1854,9 @@ Scope.prototype.$watchCollection = function (watchFn, listenerFn) {
 	var trackVeryOldValue = (listenerFn.length > 1);
 	var changeCount = 0;
 	var firstRun = true;
+
+	watchFn = parse(watchFn);
+	listenerFn = parse(listenerFn);
 
 	var internalWatchFn = function (scope) {
 		var newLength, key;
@@ -1542,7 +2015,7 @@ Scope.prototype.$apply = function (expr) {
 };
 
 Scope.prototype.$eval = function (expr, locals) {
-	return expr(this, locals);
+	return parse(expr)(this, locals);
 };
 
 Scope.prototype.$evalAsync = function (expr) {
@@ -1664,11 +2137,12 @@ Scope.prototype.$$fireEventOnScope = function (eventName, listenerArgs) {
 };
 
 module.exports = Scope;
-},{"lodash":"K2RcUv"}],9:[function(require,module,exports){
+},{"./parse":7,"lodash":"K2RcUv"}],9:[function(require,module,exports){
 /* jshint globalstrict: true */
 /* global parse: false */
 'use strict';
 var parse = require('../src/parse');
+var _ = require('lodash');
 
 describe('parse', function () {
 	it('can parse an integer', function () {
@@ -1808,9 +2282,568 @@ describe('parse', function () {
 		var fn = parse('[1, 2, 3]');
 		expect(fn.literal).to.be.true;
 		expect(fn.constant).to.be.true;
-	})
+	});
+
+	it('will parse empty object', function () {
+		var fn = parse('{}');
+		expect(fn()).to.deep.equal({});
+	});
+
+	it('will parse non-empty object', function () {
+		var fn = parse('{ a: 1, b: [2, 3], c: { d: 4 }}');
+		expect(fn()).to.deep.equal({ a: 1, b: [2, 3], c: { d: 4 }});
+	});
+
+	it('will parse an object with string keys', function () {
+		var fn = parse('{ "a key" : 1, \'another-key\': 2 }');
+		expect(fn()).to.deep.equal({ 'a key' : 1, 'another-key': 2});
+	});
+
+	it('returns the function itself when given one', function () {
+		var fn = function () {};
+		expect(parse(fn)).to.equal(fn);
+	});
+
+	it('still returns a function when given no object', function () {
+		assert.isFunction(parse());
+	});
+
+	it('looks up an attribute from the scope', function () {
+		var fn = parse('aKey');
+		expect(fn({ aKey: 42})).to.equal(42);
+		expect(fn({})).to.be.undefined;
+		expect(fn()).to.be.undefined;
+	});
+
+	it('looks up a 2-part identifier path from the scope', function () {
+		var fn = parse('aKey.anotherKey');
+		expect(fn({ aKey: { anotherKey: 42}})).to.equal(42);
+		expect(fn({aKey: {}})).to.be.undefined;
+		expect(fn({})).to.be.undefined;
+	});
+
+	it('looks up a 4-part identifier path from the scope', function () {
+		var fn = parse('aKey.secondKey.thirdKey.fourthKey');
+		expect(fn({ aKey: { secondKey: { thirdKey: { fourthKey: 42}}}})).to.equal(42);
+		expect(fn({ aKey: { secondKey: { thirdKey: {}}}})).to.be.undefined;
+		expect(fn({aKey: {}})).to.be.undefined;
+		expect(fn({})).to.be.undefined;
+	});
+
+	it('uses locals instead of scope when there is a matching key', function () {
+		var fn = parse('aKey');
+		expect(fn({ aKey: 42}, { aKey: 43})).to.equal(43);
+	});
+
+	it('does not use locals instead of scope when no matching key', function () {
+		var fn = parse('aKey');
+		expect(fn({ aKey: 42}, { otherKey: 43})).to.equal(42);
+	});
+
+	it('uses locals when a 2-part key matches in locals', function () {
+		var fn = parse('aKey.anotherKey');
+		expect(fn(
+			{ aKey: {anotherKey: 42}},
+			{ aKey: {anotherKey: 43}}
+		)).to.equal(43);
+	});
+
+	it('does not use locals when a 2-part key does not match', function () {
+		var fn = parse('aKey.anotherKey');
+		expect(fn(
+			{ aKey: {anotherKey: 42}},
+			{ otherKey: {anotherKey: 43}}
+		)).to.equal(42);
+	});
+
+	it('uses locals instead of scope when the first part (of a n-part) matches', function () {
+		var fn = parse('aKey.anotherKey');
+		expect(fn(
+			{aKey: {anotherKey: 42}}, 
+			{aKey: {}}
+		)).to.be.undefined;
+	});
+
+	it('uses locals when there is a matching local 4-part key', function () {
+		var fn = parse('aKey.key2.key3.key4');
+		expect(fn(
+			{ aKey: { key2: { key3: { key4: 42}}}},
+			{ aKey: { key2: { key3: { key4: 43}}}}
+		)).to.equal(43);
+	});
+
+	it('uses locals when there is the first part in the local key', function () {
+		var fn = parse('aKey.key2.key3.key4');
+		expect(fn(
+			{ aKey: { key2: { key3: { key4: 42}}}},
+			{ aKey: {}}
+		)).to.be.undefined;
+	});
+
+	it('does not use locals when there is no matching 4-part key', function () {
+		var fn = parse('aKey.key2.key3.key4');
+		expect(fn(
+			{ aKey: { key2: { key3: { key4: 42}}}},
+			{ otherKey: { anotherKey: 43}}
+		)).to.equal(42);
+	});
+
+	it('parses a simple string property access', function () {
+		var fn = parse('aKey["anotherKey"]');
+		expect(fn({aKey: {anotherKey: 42}})).to.equal(42);
+	});
+
+	it('parses a numeric array access', function () {
+		var fn = parse('anArray[1]');
+		expect(fn({anArray: [1, 2, 3]})).to.equal(2);
+	});
+
+	it('parses a property access with another key as property', function () {
+		var fn = parse('lock[key]');
+		expect(fn(
+			{ key: 'theKey', lock: { theKey: 42 }}
+		)).to.equal(42);
+	});
+
+	it('parses property access with another access as property', function () {
+		var fn = parse('lock[keys["aKey"]]');
+		expect(fn(
+			{ keys: { aKey: 'theKey' }, lock: { theKey: 42 }}
+		)).to.equal(42);
+	});
+
+	it('parses several field accesses back to back', function () {
+		var fn = parse('aKey["anotherKey"]["aThirdKey"]');
+		expect(fn(
+			{aKey: { anotherKey: {aThirdKey: 42}}}
+		)).to.equal(42);
+	});
+
+	it('parses a field access after a property access', function () {
+		var fn = parse('aKey["anotherKey"].aThirdKey');
+		expect(fn(
+			{ aKey: { anotherKey: { aThirdKey: 42 }}}
+		)).to.equal(42);
+	});
+
+	it('parses a chain of property and field accesses', function () {
+		var fn = parse('aKey["anotherKey"].aThirdKey["aFourthKey"]');
+		expect(fn(
+			{ aKey: { anotherKey: { aThirdKey: { aFourthKey: 42 }}}}
+		)).to.equal(42);
+	});
+
+	it('parses a function call', function () {
+		var fn = parse('aFunction()');
+		expect(fn(
+			{aFunction: function() { return 42; }}
+		)).to.equal(42);
+	});
+
+	it('parses a function call with a single number argument', function () {
+		var fn = parse('aFunction(42)');
+		expect(fn(
+			{ aFunction: function (n) { return n; }}
+		)).to.equal(42);
+	});
+
+	it('parses a function call with a single identifier argument', function () {
+		var fn = parse('aFunction(n)');
+		expect(fn(
+			{ n: 42, aFunction: function (arg) { return arg; }}
+		)).to.equal(42);
+	});
+
+	it('parses a function call with a single function call argument', function () {
+		var fn = parse('aFunction(argFn())');
+		expect(fn({
+			argFn: _.constant(42),
+			aFunction: function (arg) { return arg; }
+		})).to.equal(42);
+	});
+
+	it('parses a function call with multiple arguments', function () {
+		var fn = parse('aFunction(37, n, argFn())');
+		expect(fn({
+			n: 3,
+			argFn: _.constant(2),
+			aFunction: function (a1, a2, a3) { return a1 + a2 + a3; }
+		}));
+	});
+
+	it('does not allow calling the function constructor', function () {
+		expect(function () {
+			var fn = parse('aFunction.constructor("return window;")()');
+		}).to.throw;
+	});
+
+	it('calls functions accessed as properties with the correct this', function () {
+		var scope = {
+			anObject: {
+				aMember: 42,
+				aFunction: function () {
+					return this.aMember;
+				}
+			}
+		};
+
+		var fn = parse('anObject["aFunction"]()');
+		expect(fn(scope)).to.equal(42);
+	});
+
+	it('calls functions accessed as fields with the correct this', function () {
+		var scope = {
+			anObject: {
+				aMember: 42,
+				aFunction: function () {
+					return this.aMember;
+				}
+			}
+		};
+
+		var fn = parse('anObject.aFunction()');
+		expect(fn(scope)).to.equal(42);
+	});
+
+	it('calls methods with whitespace before function call', function () {
+		var scope = {
+			anObject: {
+				aMember: 42,
+				aFunction: function () {
+					return this.aMember;
+				}
+			}
+		};
+
+		var fn = parse('anObject.aFunction    ()');
+		expect(fn(scope)).to.equal(42);
+	});
+
+	it('clears the this context on function calls', function () {
+		var scope = {
+			anObject: {
+				aMember: 42,
+				aFunction: function () {
+					return function () {
+						this.aMember;
+					};
+				}
+			}
+		};
+
+		var fn = parse('anObject.aFunction()()');
+		expect(fn(scope)).to.be.undefined;
+	});
+
+	it('does not allow accessing window as property', function () {
+		var fn = parse('anObject["wnd"]');
+		expect(function () { fn({ anObject: { wnd: window }}); }).to.throw;
+	});
+
+	it('does not allow calling functions of window', function () {
+		var fn = parse('wnd.scroll(500, 0)');
+		expect(function () { fn({ wnd: window }); }).to.throw;
+	});
+
+	it('does not allow functions to return window', function () {
+		var fn = parse('getWnd()');
+		expect(function() { fn({getWnd: _.constant(window)}); }).to.throw();
+	});
+
+	it('does not allow calling functions on DOM elements', function() {
+		var fn = parse('el.setAttribute("evil", "true")');
+		expect(function() { fn({el: document.documentElement}); }).to.throw();
+	});
+
+	it('does not allow calling the aliased function constructor', function () {
+		var fn = parse('fnConstructor("return window")');
+		expect(function () {
+			fn({ fnConstructor: (function () { }).constructor })
+		}).to.throw;
+	});
+
+	it('parses a simple attribute assignment', function () {
+		var fn = parse('anAttribute = 42');
+		var scope = {};
+		fn(scope);
+		expect(scope.anAttribute).to.equal(42);
+	});
+
+	it('can assign any primary expression', function() {
+		var fn = parse('anAttribute = aFunction()');
+		var scope = {aFunction: _.constant(42)};
+		fn(scope);
+		expect(scope.anAttribute).to.equal(42);
+	});
+
+	it('parses a nested attribute assignment', function () {
+		var fn = parse('anObject.anAttribute = 42');
+		var scope = { anObject: {}};
+		fn(scope);
+		expect(scope.anObject.anAttribute).to.equal(42);
+	});
+
+	it('creates the objects in the setter path that do not exist', function () {
+		var fn = parse('some.nested.path = 42');
+		var scope = {};
+		fn(scope);
+		expect(scope.some.nested.path).to.equal(42);
+	});
+
+	it('parses an assignment through attribute access', function () {
+		var fn = parse('anObject["anAttribute"] = 42');
+		var scope = { anObject: {}};
+		fn(scope);
+		expect(scope.anObject.anAttribute).to.equal(42);
+	});
+
+	it('parses assignment through field access after something else', function() {
+		var fn = parse('anObject["otherObject"].nested = 42');
+		var scope = {anObject: {otherObject: {}}};
+		fn(scope);
+		expect(scope.anObject.otherObject.nested).to.equal(42);
+	});
+
+	it('parses an array with non-literals', function() {
+		var fn = parse('[a, b, c()]');
+		expect(fn({a: 1, b: 2, c: _.constant(3)})).to.deep.equal([1, 2, 3]);
+	});
+
+	it('parses an object with non-literals', function() {
+		var fn = parse('{a: a, b: obj.c()}');
+		expect(fn({
+			a: 1,
+			obj: {
+				b: _.constant(2),
+				c: function() {
+					return this.b();
+				}
+			}
+		})).to.deep.equal({a: 1, b: 2});
+	});
+
+	it('makes arrays constant when they only contain constants', function() {
+		var fn = parse('[1, 2, [3, 4]]');
+		expect(fn.constant).to.be.true;
+	});
+
+	it('makes arrays non-constant when they contain non-constants', function() {
+		expect(parse('[1, 2, a]').constant).to.be.false;
+		expect(parse('[1, 2, [[[[[a]]]]]]').constant).to.be.false;
+	});
+
+	it('makes objects constant when they only contain constants', function() {
+		var fn = parse('{a: 1, b: {c: 3}}');
+		expect(fn.constant).to.be.true;
+	});
+
+	it('makes objects non-constant when they contain non-constants', function() {
+		expect(parse('{a: 1, b: c}').constant).to.be.false;
+		expect(parse('{a: 1, b: {c: d}}').constant).to.be.false;
+	});
+
+	it('allows an array element to be an assignment', function() {
+		var fn = parse('[a = 1]');
+		var scope = {};
+		expect(fn(scope)).to.deep.equal([1]);
+		expect(scope.a).to.equal(1);
+	});
+	it('allows an object value to be an assignment', function() {
+		var fn = parse('{a: b = 1}');
+		var scope = {};
+		expect(fn(scope)).to.deep.equal({a: 1});
+		expect(scope.b).to.equal(1);
+	});
+
+	it('parses a unary +', function() {
+		expect(parse('+42')()).to.equal(42);
+		expect(parse('+a')({a: 42})).to.equal(42);
+	});
+
+	it('parses a unary !', function() {
+		expect(parse('!true')()).to.be.false;
+		expect(parse('!42')()).to.be.false;
+		expect(parse('!a')({a: false})).to.be.true;
+		expect(parse('!!a')({a: false})).to.be.false;
+	});
+
+	it('parses negated value as constant if value is constant', function() {
+		expect(parse('!true').constant).to.be.true;
+		expect(parse('!!true').constant).to.be.true;
+		expect(parse('!a').constant).to.not.be.ok;
+	});
+
+	it('parses a unary -', function() {
+		expect(parse('-42')()).to.equal(-42);
+		expect(parse('-a')({a: -42})).to.equal(42);
+		expect(parse('--a')({a: -42})).to.equal(-42);
+	});
+
+	it('parses numerically negated value as constant if needed', function() {
+		expect(parse('-42').constant).to.be.true;
+		expect(parse('-a').constant).to.not.be.ok;
+	});
+
+	it('fills missing value in unary - with zero', function() {
+		expect(parse('-a')()).to.equal(0);
+	});
+
+	it('parses a multiplication', function() {
+		expect(parse('21 * 2')()).to.equal(42);
+	});
+
+	it('parses a division', function() {
+		expect(parse('84 / 2')()).to.equal(42);
+	});
+
+	it('parses a remainder', function() {
+		expect(parse('85 % 43')()).to.equal(42);
+	});
+
+	it('parses several multiplicatives', function() {
+		expect(parse('36 * 2 % 5')()).to.equal(2);
+	});
+
+	it('parses an addition', function() {
+		expect(parse('20 + 22')()).to.equal(42);
+	});
+
+	it('parses a subtraction', function() {
+		expect(parse('42 - 22')()).to.equal(20);
+	});
+
+	it('parses multiplicatives on a higher precedence than additives', function() {
+		expect(parse('2 + 3 * 5')()).to.equal(17);
+		expect(parse('2 + 3 * 2 + 3')()).to.equal(11);
+	});
+
+	it('treats a missing subtraction operand as zero', function() {
+		expect(parse('a - b')({a: 20})).to.equal(20);
+		expect(parse('a - b')({b: 20})).to.equal(-20);
+		expect(parse('a - b')({})).to.equal(0);
+	});
+
+	it('treats a missing addition operand as zero', function() {
+		expect(parse('a + b')({a: 20})).to.equal(20);
+		expect(parse('a + b')({b: 20})).to.equal(20);
+	});
+
+	it('returns undefined from addition when both operands missing', function() {
+		expect(parse('a + b')()).to.be.undefined;
+	});
+
+	it('parses relational operators', function() {
+		expect(parse('1 < 2')()).to.be.true;
+		expect(parse('1 > 2')()).to.be.false;
+		expect(parse('1 <= 2')()).to.be.true;
+		expect(parse('2 <= 2')()).to.be.true;
+		expect(parse('1 >= 2')()).to.be.false;
+		expect(parse('2 >= 2')()).to.be.true;
+	});
+
+	it('parses equality operators', function() {
+		expect(parse('42 == 42')()).to.be.true;
+		expect(parse('42 == "42"')()).to.be.true;
+		expect(parse('42 != 42')()).to.be.false;
+		expect(parse('42 === 42')()).to.be.true;
+		expect(parse('42 === "42"')()).to.be.false;
+		expect(parse('42 !== 42')()).to.be.false;
+	});
+
+	it('parses relationals on a higher precedence than equality', function() {
+		expect(parse('2 == "2" > 2 === "2"')()).to.be.false;
+	});
+
+	it('parses additives on a higher precedence than relationals', function() {
+		expect(parse('2 + 3 < 6 - 2')()).to.be.false;
+	});
+
+	it('parses logical AND', function() {
+		expect(parse('true && true')()).to.be.true;
+		expect(parse('true && false')()).to.be.false;
+	});
+
+	it('parses logical OR', function() {
+		expect(parse('true || true')()).to.be.true;
+		expect(parse('true || false')()).to.be.true;
+		expect(parse('fales || false')()).to.be.false;
+	});
+
+	it('parses multiple ANDs', function() {
+		expect(parse('true && true && true')()).to.be.true;
+		expect(parse('true && true && false')()).to.be.false;
+	});
+
+	it('parses multiple ORs', function() {
+		expect(parse('true || true || true')()).to.be.true;
+		expect(parse('true || true || false')()).to.be.true;
+		expect(parse('false || false || true')()).to.be.true;
+		expect(parse('false || false || false')()).to.be.false;
+	});
+
+	it('short-circuits AND', function() {
+		var invoked;
+		var scope = {fn: function() { invoked = true; }};
+		parse('false && fn()')(scope);
+		expect(invoked).to.be.undefined;
+	});
+
+	it('short-circuits OR', function() {
+		var invoked;
+		var scope = {fn: function() { invoked = true; }};
+		parse('true || fn()')(scope);
+		expect(invoked).to.be.undefined;
+	});
+
+	it('parses AND with a higher precedence than OR', function() {
+		expect(parse('false && true || true')()).to.be.true;
+	});
+
+	it('parses OR with a lower precedence than equality', function() {
+		expect(parse('1 === 2 || 2 === 2')()).to.be.ok;
+	});
+
+	it('parses the ternary expression', function() {
+		expect(parse('a === 42 ? true : false')({a: 42})).to.be.true;
+		expect(parse('a === 42 ? true : false')({a: 43})).to.be.false;
+	});
+
+	it('parses OR with a higher precedence than ternary', function() {
+		expect(parse('0 || 1 ? 0 || 2 : 0 || 3')()).to.equal(2);
+	});
+
+	it('parses nested ternaries', function() {
+	expect(
+		parse('a === 42 ? b === 42 ? "a and b" : "a" : c === 42 ? "c" : "none"')({
+			a: 44,
+			b: 43,
+			c: 42
+		})).to.equal('c');
+	});
+
+	it('makes ternaries constants if their operands are', function() {
+		expect(parse('true ? 42 : 43').constant).to.be.ok;
+		expect(parse('true ? 42 : a').constant).to.not.be.ok;
+	});
+
+	it('parses parentheses altering precedence order', function() {
+		expect(parse('21 * (3 - 1)')()).to.equal(42);
+		expect(parse('false && (true || true)')()).to.be.false;
+		expect(parse('-((a % 2) === 0 ? 1 : 2)')({a: 42})).to.equal(-1);
+	});
+
+	it('parses several statements', function() {
+		var fn = parse('a = 1; b = 2; c = 3');
+		var scope = {};
+		fn(scope);
+		expect(scope).to.deep.equal({a: 1, b: 2, c: 3});
+	});
+
+	it('returns the value of the last statement', function() {
+		expect(parse('a = 1; b = 2; a + b')({})).to.equal(3);
+	});
 });
-},{"../src/parse":7}],10:[function(require,module,exports){
+},{"../src/parse":7,"lodash":"K2RcUv"}],10:[function(require,module,exports){
 /* jshint globalstrict:true */
 /* global Scope: false */
 'use strict';
@@ -2420,6 +3453,43 @@ describe('Scope', function () {
 			scope.$digest();
 			expect(scope.counter).to.equal(0);
 		});
+	
+		it('accepts expressions for watch functions', function () {
+			var theValue;
+
+			scope.$watch('42', function (newValue, oldValue, scope) {
+				theValue = newValue;
+			});
+			scope.$digest();
+
+			expect(theValue).to.equal(42);
+		});
+
+		it('removes constant watches after first invocation', function () {
+			scope.$watch('42', function () {});
+			scope.$digest();
+
+			expect(scope.$$watchers.length).to.equal(0);
+		});
+
+		it('accepts expressions for listener functions', function () {
+			scope.$watch('42', '"forty-two"');
+			scope.$digest();
+		});
+
+		it('accepts expressions in $apply', function () {
+			expect(scope.$eval('42')).to.equal(42);
+		});
+
+		it('accepts expressions in $eval', function () {
+			expect(scope.$apply('42')).to.equal(42);
+		});
+
+		it('accepts expressions in $evalAsync', function (done) {
+			scope.$evalAsync('42');
+			scope.$$postDigest(done);
+		});
+
 	});
 
 	describe('inheritance', function () {
@@ -3119,6 +4189,25 @@ describe('Scope', function () {
 			scope.$digest();
 
 			expect(oldValueGiven).to.deep.equal({ a: 1, b: 2 });
+		});
+
+		it('accepts expressions for $watch functions', function () {
+			var theValue;
+
+			scope.$watchCollection('[1, 2, 3]', function (newValue, oldValue, scope) {
+				theValue = newValue;
+			});
+
+			scope.$digest();
+
+			expect(theValue).to.deep.equal([1, 2, 3]);
+		});
+
+		it('accepts expressions for listener functions', function () {
+			var theValue;
+
+			scope.$watchCollection('[1, 2, 3]', '"one-two-three"');
+			scope.$digest();
 		});
 	});
 
