@@ -1049,6 +1049,141 @@ process.chdir = function (dir) {
 
 },{}],6:[function(require,module,exports){
 /* jshint globalstrict: true */
+/* global angular: false */
+'use strict';
+
+var _ = require('lodash');
+
+var FN_ARGS = /^function\s*[^\(]*\(\s*([^\)]*)\)/m;
+var FN_ARG = /^\s*(_?)(\S+?)\1\s*$/;
+var STRIP_COMMENTS = /(\/\/.*$)|(\/\*.*?\*\/)/mg;
+
+function createInjector (modulesToLoad) {
+	var cache = {};
+	var loadedModules = {};
+	var $provide = {
+		constant: function (key, value) {
+			if (key === 'hasOwnProperty') {
+				throw 'hasOwnProperty is not a valid constant name!';
+			}
+			cache[key] = value;
+		}
+	};
+
+	var annotate = function (fn) {
+		if(_.isArray(fn)) {
+			return fn.slice(0, fn.length - 1);
+		} else if (fn.$inject) {
+			return fn.$inject;
+		} else if (!fn.length) {
+			return [];
+		} else {
+			var source = fn.toString().replace(STRIP_COMMENTS, '');
+			var argDeclaration = source.match(FN_ARGS);
+			return _.map(argDeclaration[1].split(','), function (argName) {
+				return argName.match(FN_ARG)[2];
+			});
+		}
+	};
+
+	var invoke = function (fn, self, locals) {
+		var args = _.map(annotate(fn), function (token) {
+			if (_.isString(token)) {
+				return locals && locals.hasOwnProperty(token) ? locals[token] : cache[token];
+			} else {
+				throw 'Incorrect injection token! Expected a string, got ' + token;
+			}
+		});
+
+		if(_.isArray(fn)) {
+			fn = _.last(fn);
+		}
+		return fn.apply(self, args);
+	};
+
+	var instantiate = function (Type, locals) {
+		var UnWrappedType = _.isArray(Type) ? _.last(Type) : Type;
+		var instance = Object.create(UnWrappedType.prototype);
+		invoke(Type, instance, locals);
+		return instance;
+	};
+
+	_.forEach(modulesToLoad, function loadModule(moduleName) {
+		if (!loadedModules.hasOwnProperty(moduleName)) {
+			loadedModules[moduleName] = true;
+			var module = angular.module(moduleName);
+			_.forEach(module.requires, loadModule);
+			_.forEach(module._invokeQueue, function (invokeArgs) {
+				var method = invokeArgs[0];
+				var args = invokeArgs[1];
+				$provide[method].apply($provide, args);
+			});
+		}
+	});
+
+	return {
+		has: function (key) {
+			return cache.hasOwnProperty(key);
+		},
+		get: function (key) {
+			return cache[key];
+		},
+		annotate: annotate, 
+		invoke: invoke,
+		instantiate: instantiate
+	};
+};
+
+module.exports = createInjector;
+},{"lodash":"K2RcUv"}],7:[function(require,module,exports){
+/* jshint globalstrict: true */
+'use strict';
+
+function setupModuleLoader (window) {
+	var ensure = function (obj, name, factory) {
+		return obj[name] || (obj[name] = factory());
+	};
+	var angular = ensure(window, 'angular', Object);
+
+	var createModule = function (name, requires, modules) {
+		if (name === 'hasOwnProperty') {
+			throw 'hasOwnProperty is not a valid module name';
+		}
+		var moduleInstance = {
+			name: name,
+			requires: requires,
+			constant: function (key, value) {
+				moduleInstance._invokeQueue.push(['constant', [key, value]]);
+			},
+			_invokeQueue: []
+		};
+		modules[name] = moduleInstance;
+		return moduleInstance;
+	};
+
+	var getModule = function (name, modules) {
+		if(modules.hasOwnProperty(name)) {
+			return modules[name];
+		} else {
+			throw 'Module ' + name + ' is not available!';
+		}
+	}
+
+	ensure(angular, 'module', function () {
+		var modules = {};
+		return function (name, requires) {
+			if (requires) {
+				return createModule(name, requires, modules);
+			} else {
+				return getModule(name, modules);
+			}
+		};
+	});
+};
+
+module.exports = setupModuleLoader;
+},{}],8:[function(require,module,exports){
+/* jshint globalstrict: true */
 'use strict';
 
 var _ = require('lodash');
@@ -1063,7 +1198,7 @@ _.mixin({
 		return length === 0 || (_.isNumber(length) && length > 0 && (length - 1) in obj);
 	}
 });
-},{"lodash":"K2RcUv"}],7:[function(require,module,exports){
+},{"lodash":"K2RcUv"}],9:[function(require,module,exports){
 /* jshint globalstrict: true */
 'use strict';
 
@@ -1756,7 +1891,7 @@ function parse(expr) {
 
 module.exports = parse;
 
-},{"lodash":"K2RcUv"}],8:[function(require,module,exports){
+},{"lodash":"K2RcUv"}],10:[function(require,module,exports){
 /* jshint globalstrict: true */
 /* global parse: false */
 'use strict';
@@ -2137,7 +2272,399 @@ Scope.prototype.$$fireEventOnScope = function (eventName, listenerArgs) {
 };
 
 module.exports = Scope;
-},{"./parse":7,"lodash":"K2RcUv"}],9:[function(require,module,exports){
+},{"./parse":9,"lodash":"K2RcUv"}],11:[function(require,module,exports){
+/* jshint globalstrict: true */
+/* global createInjector: false, setupModuleLoader: false, angular: false */
+'use strict';
+
+var setupModuleLoader = require('../src/loader');
+var createInjector = require('../src/injector');
+var _ = require('lodash');
+
+describe('injector', function () {
+
+	beforeEach(function () {
+		delete window.angular;
+		setupModuleLoader(window);
+	});
+
+	it('can be created', function () {
+		var injector = createInjector([]);
+		expect(injector).to.be.defined;
+	});
+
+	it('has a constant that has been registered to a module', function () {
+		var module = angular.module('myModule', []);
+		module.constant('aConstant', 42);
+		var injector = createInjector(['myModule']);
+		expect(injector.has('aConstant')).to.be.true;
+	});
+
+	it('does not have a non-registered constant', function () {
+		var module = angular.module('myModule', []);
+		var injector = createInjector(['myModule']);
+		expect(injector.has('aConstant')).to.be.false;
+	});
+
+	it('does not allow a constant called hasOwnProperty', function () {
+		var module = angular.module('myModule', []);
+		module.constant('hasOwnProperty', _.constant(false));
+		expect(function () {
+			createInjector(['myModule']);
+		}).to.throw;
+	});
+
+	it('can return a registered constant', function () {
+		var module = angular.module('myModule', []);
+		module.constant('aConstant', 42);
+		var injector = createInjector(['myModule']);
+		expect(injector.get('aConstant')).to.equal(42);
+	});
+
+	it('loads multiple modules', function () {
+		var module1 = angular.module('myModule', []);
+		var module2 = angular.module('myOtherModule', []);
+		module1.constant('aConstant', 42);
+		module2.constant('anotherConstant', 43);
+		var injector = createInjector(['myModule', 'myOtherModule']);
+
+		expect(injector.has('aConstant')).to.be.true;
+		expect(injector.has('anotherConstant')).to.be.true;
+	});
+
+	it('loads the required modules of a module', function () {
+		var module1 = angular.module('myModule', []);
+		var module2 = angular.module('myOtherModule', ['myModule']);
+		module1.constant('aConstant', 42);
+		module2.constant('anotherConstant', 43);
+		var injector = createInjector(['myOtherModule']);
+
+		expect(injector.has('aConstant')).to.be.true;
+		expect(injector.has('anotherConstant')).to.be.true;
+	});
+
+	it('loads the transitively required modules of a module', function () {
+		var module1 = angular.module('myModule', []);
+		var module2 = angular.module('myOtherModule', ['myModule']);
+		var module3 = angular.module('myThirdModule', ['myOtherModule']);
+		module1.constant('aConstant', 42);
+		module2.constant('anotherConstant', 43);
+		module2.constant('aThirdConstant', 44);
+		var injector = createInjector(['myThirdModule']);
+
+		expect(injector.has('aConstant')).to.be.true;
+		expect(injector.has('anotherConstant')).to.be.true;
+		expect(injector.has('aThirdConstant')).to.be.true;
+	});
+
+	it('loads each module only once', function () {
+		var module1 = angular.module('myModule', ['myOtherModule']);
+		var module2 = angular.module('myOtherModule', ['myModule']);
+
+		createInjector(['myModule']);
+	});
+
+	it('invokes an annotated function with dependency injection', function () {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.constant('b', 2);
+		var injector = createInjector(['myModule']);
+
+		var fn = function (one, two) { return one + two; };
+		fn.$inject = ['a', 'b'];
+
+		expect(injector.invoke(fn)).to.equal(3);
+	});
+
+	it('does not accept non-strings as injection tokens', function () {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		var injector = createInjector(['myModule']);
+
+		var fn = function (one, two) { return one + two; };
+		fn.$inject = ['a', 2];
+
+		expect(function () {
+			injector.invoke(fn);
+		}).to.throw;
+	});
+
+	it('invokes a function with the given this context', function () {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		var injector = createInjector(['myModule']);
+
+		var obj = {
+			two: 2,
+			fn: function (one) { return one + this.two; }
+		};
+		obj.fn.$inject = ['a'];
+
+		expect(injector.invoke(obj.fn, obj)).to.equal(3);
+	});
+
+	it('overrides dependencies with locals when invoking', function () {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.constant('b', 2);
+		var injector = createInjector(['myModule']);
+
+		var fn = function (one, two) { return one + two; };
+		fn.$inject = ['a', 'b'];
+
+		expect(injector.invoke(fn, undefined, { b: 3 })).to.equal(4);
+	});
+
+	describe('annotate', function () {
+
+		it('returns the $inject annotation of a function when it has one', function () {
+			var injector = createInjector([]);
+
+			var fn = function () {};
+			fn.$inject = ['a', 'b'];
+
+			expect(injector.annotate(fn)).to.deep.equal(['a', 'b']);
+		});
+
+		it('returns the array-style annotations of a function', function () {
+			var injector = createInjector([]);
+
+			var fn = ['a', 'b', function () {}];
+
+			expect(injector.annotate(fn)).to.deep.equal(['a','b']);
+		});
+
+		it('returns an empty array for a non-annotated 0-arg function', function () {
+			var injector = createInjector([]);
+
+			var fn = function () {};
+
+			expect(injector.annotate(fn)).to.deep.equal([]);
+		});
+
+		it('returns annotations parsed from function args when not annotated', function () {
+			var injector = createInjector([]);
+
+			var fn = function (a, b) {};
+
+			expect(injector.annotate(fn)).to.deep.equal(['a', 'b']);
+		});
+
+		it('strips comments from argument lists when parsing', function() {
+			var injector = createInjector([]);
+			
+			var fn = function(a, /*b,*/ c) { };
+		
+			expect(injector.annotate(fn)).to.deep.equal(['a', 'c']);
+		});
+
+		it('strips out several comments from argument lists when parsing', function() {
+			var injector = createInjector([]);
+			
+			var fn = function(a, /*b,*/ c/*, d*/) { };
+		
+			expect(injector.annotate(fn)).to.deep.equal(['a', 'c']);
+		});
+
+		it('strips // comments from argument lists when parsing', function() {
+			var injector = createInjector([]);
+			
+			var fn = function(a, //b,
+			
+			c) { };
+			
+			expect(injector.annotate(fn)).to.deep.equal(['a', 'c']);
+		});
+
+		it('strips surrounding underscores from argument names when parsing', function() {
+			var injector = createInjector([]);
+			
+			var fn = function(a, _b_, c_, _d, an_argument) { };
+			
+			expect(injector.annotate(fn)).to.deep.equal(['a', 'b', 'c_', '_d', 'an_argument']);
+		});
+
+		it('invokes an array-annotated function with dependency injection', function() {
+			var module = angular.module('myModule', []);
+			module.constant('a', 1);
+			module.constant('b', 2);
+			var injector = createInjector(['myModule']);
+		
+			var fn = ['a', 'b', function(one, two) { return one + two; }];
+		
+			expect(injector.invoke(fn)).to.equal(3);
+		});
+
+		it('invokes a non-annotated function with dependency injection', function() {
+			var module = angular.module('myModule', []);
+			module.constant('a', 1);
+			module.constant('b', 2);
+			var injector = createInjector(['myModule']);
+			
+			var fn = function(a, b) { return a + b; };
+			
+			expect(injector.invoke(fn)).to.equal(3);
+		});
+
+		it('instantiates an annotated constructor function', function () {
+			var module = angular.module('myModule', []);
+			module.constant('a', 1);
+			module.constant('b', 2);
+			var injector = createInjector(['myModule']);
+
+			function Type (one, two) {
+				this.result = one + two;
+			};
+
+			Type.$inject = ['a', 'b'];
+
+			var instance = injector.instantiate(Type);
+			expect(instance.result).to.equal(3);
+		});
+
+		it('instantiates an array-annotated constructor function', function() {
+			var module = angular.module('myModule', []);
+			module.constant('a', 1);
+			module.constant('b', 2);
+			var injector = createInjector(['myModule']);
+			
+			function Type (one, two) {
+				this.result = one + two;
+			};
+
+			var instance = injector.instantiate(['a', 'b', Type]);
+			
+			expect(instance.result).to.equal(3);
+		});
+
+		it('instantiates a non-annotated constructor function', function() {
+			var module = angular.module('myModule', []);
+			module.constant('a', 1);
+			module.constant('b', 2);
+			var injector = createInjector(['myModule']);
+			
+			function Type(a, b) {
+				this.result = a + b;
+			};
+
+			var instance = injector.instantiate(Type);
+
+			expect(instance.result).to.equal(3);
+		});
+
+		it('uses the prototype of the constructor when instantiating', function() {
+			function BaseType() { }
+			BaseType.prototype.getValue = _.constant(42);
+			
+			function Type() { this.v = this.getValue(); }
+			Type.prototype = BaseType.prototype;
+			
+			var module = angular.module('myModule', []);
+			var injector = createInjector(['myModule']);
+			
+			var instance = injector.instantiate(Type);
+			expect(instance.v).to.equal(42);
+		});
+
+		it('supports locals when instantiating', function() {
+			var module = angular.module('myModule', []);
+			module.constant('a', 1);
+			module.constant('b', 2);
+			var injector = createInjector(['myModule']);
+			
+			function Type(a, b) {
+				this.result = a + b;
+			}
+			
+			var instance = injector.instantiate(Type, {b: 3});
+			
+			expect(instance.result).to.equal(4);
+		});
+	});
+});
+
+},{"../src/injector":6,"../src/loader":7,"lodash":"K2RcUv"}],12:[function(require,module,exports){
+/* jshint globalstrict: true */
+/* global setupModuleLoader: false */
+'use strict';
+
+var setupModuleLoader = require('../src/loader');
+
+describe('setupModuleLoader', function () {
+
+	beforeEach(function () {
+		delete window.angular;
+	});
+
+	it('exposes angular on the window', function() {
+		setupModuleLoader(window);
+		expect(window.angular).to.be.defined;
+	});
+
+	it('creates angular just once', function () {
+		setupModuleLoader(window);
+		var ng = window.angular;
+		setupModuleLoader(window);
+		expect(window.angular).to.deep.equal(ng);
+	});
+
+	it('exposes the angular module function', function () {
+		setupModuleLoader(window);
+		expect(window.angular.module).to.be.defined;
+	});
+
+	it('exposes the angular module function just once', function () {
+		setupModuleLoader(window);
+		var module = window.angular.module;
+		setupModuleLoader(window);
+		expect(window.angular.module).to.deep.equal(module);
+	});
+
+	describe('modules', function () {
+
+		beforeEach(function () {
+			setupModuleLoader(window);
+		});
+
+		it('allows registering a module', function () {
+			var myModule = window.angular.module('myModule', []);
+			expect(myModule).to.be.defined;
+			expect(myModule.name).to.equal('myModule');
+		});
+
+		it('replaces a module when registered with the same name again', function () {
+			var myModule = window.angular.module('myModule', []);
+			var myNewModule = window.angular.module('myModule', []);
+			expect(myNewModule).to.not.equal(myModule);
+		});
+
+		it('attaches the requires array to the registered module', function () {
+			var myModule = window.angular.module('myModule', ['myOtherModule']);
+			expect(myModule.requires).to.deep.equal(['myOtherModule']);
+		});
+
+		it('allows getting a module', function () {
+			var myModule = window.angular.module('myModule',[]);
+			var gotModule = window.angular.module('myModule');
+
+			expect(gotModule).to.be.defined;
+			expect(gotModule).to.equal(myModule);
+		});
+
+		it('throws when trying to get a nonexistant module', function () {
+			expect(function () {
+				window.angular.module('myModule');
+			}).to.throw;
+		});
+
+		it('does not allow a module to be called hasOwnProperty', function () {
+			expect(function () {
+				window.angular.module('hasOwnProperty', []);
+			}).to.throw;
+		});
+	});
+});
+},{"../src/loader":7}],13:[function(require,module,exports){
 /* jshint globalstrict: true */
 /* global parse: false */
 'use strict';
@@ -2843,7 +3370,7 @@ describe('parse', function () {
 		expect(parse('a = 1; b = 2; a + b')({})).to.equal(3);
 	});
 });
-},{"../src/parse":7,"lodash":"K2RcUv"}],10:[function(require,module,exports){
+},{"../src/parse":9,"lodash":"K2RcUv"}],14:[function(require,module,exports){
 /* jshint globalstrict:true */
 /* global Scope: false */
 'use strict';
@@ -4512,4 +5039,4 @@ describe('Scope', function () {
 		})
 	});
 });
-},{"../src/myAngular":6,"../src/scope":8,"assert":1,"lodash":"K2RcUv"}]},{},[9,10])
+},{"../src/myAngular":8,"../src/scope":10,"assert":1,"lodash":"K2RcUv"}]},{},[11,12,13,14])
