@@ -1057,20 +1057,38 @@ var _ = require('lodash');
 var FN_ARGS = /^function\s*[^\(]*\(\s*([^\)]*)\)/m;
 var FN_ARG = /^\s*(_?)(\S+?)\1\s*$/;
 var STRIP_COMMENTS = /(\/\/.*$)|(\/\*.*?\*\/)/mg;
+var INSTANTIATING = { };
 
 function createInjector (modulesToLoad) {
-	var cache = {};
+	var providerCache = {};
+	var providerInjector = createInternalInjector(providerCache, function () {
+		throw 'Unknown provider: ' + path.join(' <- ');
+	});
+	var instanceCache = {};
+	var instanceInjector = createInternalInjector(instanceCache, function (name) {
+		var provider = providerInjector.get(name + 'Provider');
+		return instanceInjector.invoke(provider.$get, provider);
+	});
 	var loadedModules = {};
+	var path = [];
+
 	var $provide = {
 		constant: function (key, value) {
 			if (key === 'hasOwnProperty') {
 				throw 'hasOwnProperty is not a valid constant name!';
 			}
-			cache[key] = value;
+			instanceCache[key] = value;
+			providerCache[key] = value;
+		},
+		provider: function (key, provider) {
+			if(_.isFunction(provider)) {
+				provider = providerInjector.instantiate(provider);
+			}
+			providerCache[key + 'Provider'] = provider;
 		}
 	};
 
-	var annotate = function (fn) {
+	function annotate (fn) {
 		if(_.isArray(fn)) {
 			return fn.slice(0, fn.length - 1);
 		} else if (fn.$inject) {
@@ -1086,26 +1104,61 @@ function createInjector (modulesToLoad) {
 		}
 	};
 
-	var invoke = function (fn, self, locals) {
-		var args = _.map(annotate(fn), function (token) {
-			if (_.isString(token)) {
-				return locals && locals.hasOwnProperty(token) ? locals[token] : cache[token];
-			} else {
-				throw 'Incorrect injection token! Expected a string, got ' + token;
+	function createInternalInjector (cache, factoryFn) {
+
+		function getService (name) {
+			if (cache.hasOwnProperty(name)) {
+				if(cache[name] === INSTANTIATING) {
+					throw new Error('Circular dependency found: ' + path.join(' <- '));
+				}
+				return cache[name];
+			} else  {
+				path.unshift(name);
+				cache[name] = INSTANTIATING;
+				try {
+					return (cache[name] = factoryFn(name));
+				} finally {
+					path.shift();
+					if(cache[name] === INSTANTIATING) {
+						delete cache[name];
+					}
+				}
 			}
-		});
+		};
 
-		if(_.isArray(fn)) {
-			fn = _.last(fn);
-		}
-		return fn.apply(self, args);
-	};
+		function invoke (fn, self, locals) {
+			var args = _.map(annotate(fn), function (token) {
+				if (_.isString(token)) {
+					return locals && locals.hasOwnProperty(token) ? locals[token] : getService(token);
+				} else {
+					throw 'Incorrect injection token! Expected a string, got ' + token;
+				}
+			});
 
-	var instantiate = function (Type, locals) {
-		var UnWrappedType = _.isArray(Type) ? _.last(Type) : Type;
-		var instance = Object.create(UnWrappedType.prototype);
-		invoke(Type, instance, locals);
-		return instance;
+			if(_.isArray(fn)) {
+				fn = _.last(fn);
+			}
+			return fn.apply(self, args);
+		};
+
+		function instantiate (Type, locals) {
+			var UnWrappedType = _.isArray(Type) ? _.last(Type) : Type;
+			var instance = Object.create(UnWrappedType.prototype);
+			invoke(Type, instance, locals);
+			return instance;
+		};	
+
+
+
+		return {
+			has: function (name) {
+				return cache.hasOwnProperty(name) || providerCache.hasOwnProperty(name + 'Provider');
+			},
+			get: getService,
+			annotate: annotate, 
+			invoke: invoke,
+			instantiate: instantiate
+		};
 	};
 
 	_.forEach(modulesToLoad, function loadModule(moduleName) {
@@ -1121,17 +1174,7 @@ function createInjector (modulesToLoad) {
 		}
 	});
 
-	return {
-		has: function (key) {
-			return cache.hasOwnProperty(key);
-		},
-		get: function (key) {
-			return cache[key];
-		},
-		annotate: annotate, 
-		invoke: invoke,
-		instantiate: instantiate
-	};
+	return instanceInjector;
 };
 
 module.exports = createInjector;
@@ -1149,12 +1192,17 @@ function setupModuleLoader (window) {
 		if (name === 'hasOwnProperty') {
 			throw 'hasOwnProperty is not a valid module name';
 		}
+		var invokeLater = function (method, arrayMethod) {
+			return function () {
+				moduleInstance._invokeQueue[arrayMethod || 'push']([method, arguments]);
+				return moduleInstance;
+			};
+		};
 		var moduleInstance = {
 			name: name,
 			requires: requires,
-			constant: function (key, value) {
-				moduleInstance._invokeQueue.push(['constant', [key, value]]);
-			},
+			constant: invokeLater('constant', 'unshift'),
+			provider: invokeLater('provider'),
 			_invokeQueue: []
 		};
 		modules[name] = moduleInstance;
@@ -2483,103 +2531,315 @@ describe('injector', function () {
 			
 			expect(injector.annotate(fn)).to.deep.equal(['a', 'b', 'c_', '_d', 'an_argument']);
 		});
+	});
 
-		it('invokes an array-annotated function with dependency injection', function() {
-			var module = angular.module('myModule', []);
-			module.constant('a', 1);
-			module.constant('b', 2);
-			var injector = createInjector(['myModule']);
+	it('invokes an array-annotated function with dependency injection', function() {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.constant('b', 2);
+		var injector = createInjector(['myModule']);
+	
+		var fn = ['a', 'b', function(one, two) { return one + two; }];
+	
+		expect(injector.invoke(fn)).to.equal(3);
+	});
+
+	it('invokes a non-annotated function with dependency injection', function() {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.constant('b', 2);
+		var injector = createInjector(['myModule']);
 		
-			var fn = ['a', 'b', function(one, two) { return one + two; }];
+		var fn = function(a, b) { return a + b; };
 		
-			expect(injector.invoke(fn)).to.equal(3);
-		});
+		expect(injector.invoke(fn)).to.equal(3);
+	});
 
-		it('invokes a non-annotated function with dependency injection', function() {
-			var module = angular.module('myModule', []);
-			module.constant('a', 1);
-			module.constant('b', 2);
-			var injector = createInjector(['myModule']);
-			
-			var fn = function(a, b) { return a + b; };
-			
-			expect(injector.invoke(fn)).to.equal(3);
-		});
+	it('instantiates an annotated constructor function', function () {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.constant('b', 2);
+		var injector = createInjector(['myModule']);
 
-		it('instantiates an annotated constructor function', function () {
-			var module = angular.module('myModule', []);
-			module.constant('a', 1);
-			module.constant('b', 2);
-			var injector = createInjector(['myModule']);
+		function Type (one, two) {
+			this.result = one + two;
+		};
 
-			function Type (one, two) {
-				this.result = one + two;
-			};
+		Type.$inject = ['a', 'b'];
 
-			Type.$inject = ['a', 'b'];
+		var instance = injector.instantiate(Type);
+		expect(instance.result).to.equal(3);
+	});
 
-			var instance = injector.instantiate(Type);
-			expect(instance.result).to.equal(3);
-		});
+	it('instantiates an array-annotated constructor function', function() {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.constant('b', 2);
+		var injector = createInjector(['myModule']);
+		
+		function Type (one, two) {
+			this.result = one + two;
+		};
 
-		it('instantiates an array-annotated constructor function', function() {
-			var module = angular.module('myModule', []);
-			module.constant('a', 1);
-			module.constant('b', 2);
-			var injector = createInjector(['myModule']);
-			
-			function Type (one, two) {
-				this.result = one + two;
-			};
+		var instance = injector.instantiate(['a', 'b', Type]);
+		
+		expect(instance.result).to.equal(3);
+	});
 
-			var instance = injector.instantiate(['a', 'b', Type]);
-			
-			expect(instance.result).to.equal(3);
-		});
+	it('instantiates a non-annotated constructor function', function() {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.constant('b', 2);
+		var injector = createInjector(['myModule']);
+		
+		function Type(a, b) {
+			this.result = a + b;
+		};
 
-		it('instantiates a non-annotated constructor function', function() {
-			var module = angular.module('myModule', []);
-			module.constant('a', 1);
-			module.constant('b', 2);
-			var injector = createInjector(['myModule']);
-			
-			function Type(a, b) {
-				this.result = a + b;
-			};
+		var instance = injector.instantiate(Type);
 
-			var instance = injector.instantiate(Type);
+		expect(instance.result).to.equal(3);
+	});
 
-			expect(instance.result).to.equal(3);
-		});
+	it('uses the prototype of the constructor when instantiating', function() {
+		function BaseType() { }
+		BaseType.prototype.getValue = _.constant(42);
+		
+		function Type() { this.v = this.getValue(); }
+		Type.prototype = BaseType.prototype;
+		
+		var module = angular.module('myModule', []);
+		var injector = createInjector(['myModule']);
+		
+		var instance = injector.instantiate(Type);
+		expect(instance.v).to.equal(42);
+	});
 
-		it('uses the prototype of the constructor when instantiating', function() {
-			function BaseType() { }
-			BaseType.prototype.getValue = _.constant(42);
-			
-			function Type() { this.v = this.getValue(); }
-			Type.prototype = BaseType.prototype;
-			
-			var module = angular.module('myModule', []);
-			var injector = createInjector(['myModule']);
-			
-			var instance = injector.instantiate(Type);
-			expect(instance.v).to.equal(42);
-		});
+	it('supports locals when instantiating', function() {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.constant('b', 2);
+		var injector = createInjector(['myModule']);
+		
+		function Type(a, b) {
+			this.result = a + b;
+		}
+		
+		var instance = injector.instantiate(Type, {b: 3});
+		
+		expect(instance.result).to.equal(4);
+	});
 
-		it('supports locals when instantiating', function() {
-			var module = angular.module('myModule', []);
-			module.constant('a', 1);
-			module.constant('b', 2);
-			var injector = createInjector(['myModule']);
-			
-			function Type(a, b) {
-				this.result = a + b;
+	it('allows registering a provider and uses its $get', function () {
+		var module = angular.module('myModule', []);
+		module.provider('a', {
+			$get: function () {
+				return 42;
 			}
-			
-			var instance = injector.instantiate(Type, {b: 3});
-			
-			expect(instance.result).to.equal(4);
 		});
+
+		var injector = createInjector(['myModule']);
+
+		expect(injector.has('a')).to.be.true;
+		expect(injector.get('a')).to.equal(42);
+	});
+
+	it('injects the $get method of a provider', function () {
+		var module = angular.module('myModule', []);
+		module.constant('a', 1);
+		module.provider('b', {
+			$get: function (a) {
+				return a + 2;
+			}
+		});
+
+		var injector = createInjector(['myModule']);
+
+		expect(injector.get('b')).to.equal(3);
+	});
+
+	it('injects the $get method of a provider lazily', function () {
+		var module = angular.module('myModule', []);
+		module.provider('b', {
+			$get: function (a) {
+				return a + 2;
+			}
+		});
+		module.provider('a', { $get: _.constant(1) });
+		
+		var injector = createInjector(['myModule']);
+
+		expect(injector.get('b')).to.equal(3);
+	});
+
+	it('instantiates a dependency only once', function () {
+		var module = angular.module('myModule', []);
+		module.provider('a', { $get: function () { return {}; } });
+		
+		var injector = createInjector(['myModule']);
+		expect(injector.get('a')).to.equal(injector.get('a'));
+	});
+
+	it('notifies the user about a circular dependency', function() {
+		var module = angular.module('myModule', []);
+		module.provider('a', {$get: function(b) { }});
+		module.provider('b', {$get: function(c) { }});
+		module.provider('c', {$get: function(a) { }});
+		
+		var injector = createInjector(['myModule']);
+		
+		expect(function() {
+			injector.get('a');
+		}).to.throw('Circular dependency found');
+	});
+
+	it('cleans up the circular marker when instantiation fails', function () {
+		var module = angular.module('myModule', []);
+		module.provider('a', { $get: function () { 
+			throw 'Failing instantiation!';
+		}});
+
+		var injector = createInjector(['myModule']);
+
+		expect(function () {
+			injector.get('a');
+		}).to.throw('Failing instantiation!');
+
+		expect(function () {
+			injector.get('a');
+		}).to.throw('Failing instantiation!');
+	});
+
+	it('notifies the user about a circular dependency', function () {
+		var module = angular.module('myModule', []);
+		module.provider('a', {$get: function(b) { }});
+		module.provider('b', {$get: function(c) { }});
+		module.provider('c', {$get: function(a) { }});
+
+		var injector = createInjector(['myModule']);
+		
+		expect(function() {
+			injector.get('a');
+		}).to.throw('Circular dependency found: c <- b <- a');
+	});
+
+	it('instantiates a provider if given as a constructor function', function () {
+		var module = angular.module('myModule', []);
+
+		module.provider('a', function AProvider () {
+			this.$get = function () { return 42; }
+		});
+
+		var injector = createInjector(['myModule']);
+
+		expect(injector.get('a')).to.equal(42);
+	});
+
+	it('injects the given provider constructor function', function () {
+		var module = angular.module('myModule', []);
+
+		module.constant('b', 2);
+		module.provider('a', function AProvider (b) {
+			this.$get = function () { return 1 + b; }
+		});
+
+		var injector = createInjector(['myModule']);
+
+		expect(injector.get('a')).to.equal(3);
+	});
+
+	it('injects another provider to a provider constructor function', function () {
+		var module = angular.module('myModule', []);
+
+		module.provider('a', function AProvider () {
+			var value = 1;
+			this.setValue = function (v) { value = v; };
+			this.$get = function () { return value; }
+		});
+
+		module.provider('b', function BProvider (aProvider) {
+			aProvider.setValue(2);
+			this.$get = function () {};
+		});
+
+		var injector = createInjector(['myModule']);
+
+		expect(injector.get('a')).to.equal(2);
+	});
+
+	it('does not inject an instance to a provider constructor function', function () {
+		var module = angular.module('myModule', []);
+
+		module.provider('a', function AProvider () {
+			this.$get = function () { return 1; }
+		});
+
+		module.provider('b', function BProvider (a) {
+			this.$get = function () { return a; }
+		});
+
+		expect(function () {
+			createInjector(['myModule']);
+		}).to.throw;
+	});	
+
+	it('does not inject a provider to a $get function', function () {
+		var module = angular.module('myModule', []);
+
+		module.provider('a', function AProvider () {
+			this.$get = function () { return 1; }
+		});
+
+		module.provider('b', function BProvider () {
+			this.$get = function (aProvider) { return aProvider.$get(); }
+		});
+		
+		var injector = createInjector(['myModule']);
+
+		expect(function () {
+			injector.get('b');
+		}).to.throw;
+	});
+
+	it('does not inject a provider to invoke', function () {
+		var module = angular.module('myModule', []);
+
+		module.provider('a', function AProvider () {
+			this.$get = function () { return 1; }
+		});
+		
+		var injector = createInjector(['myModule']);
+
+		expect(function () {
+			injector.invoke(function (aProvider) {});
+		}).to.throw;
+	});
+
+	it('does not give access to providers through get', function () {
+		var module = angular.module('myModule', []);
+
+		module.provider('a', function AProvider () {
+			this.$get = function () { return 1; }
+		});
+
+		var injector = createInjector(['myModule']);
+
+		expect(function () {
+			injector.get('aProvider');
+		}).to.throw;
+	});
+
+	it('registers constants first to make them available to providers', function () {
+		var module = angular.module('myModule', []);
+
+		module.provider('a', function AProvider (b) {
+			this.$get = function () { return b; };
+		});
+		module.constant('b', 42);
+
+		var injector = createInjector(['myModule']);
+
+		expect(injector.get('a')).to.equal(42);
 	});
 });
 
