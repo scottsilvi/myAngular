@@ -18,8 +18,10 @@ gulp.task('browserify', function () {
 	var bundler = bundleMethod({
 		// Specify the entry point of the app
 		entries: ['./src/app.js'],
+		// add source maps
 		debug: true
 	});
+
 	return bundle(bundler, 'myAngular.min.js', './build/');
 });
 
