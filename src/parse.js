@@ -5,6 +5,10 @@ var _ = require('lodash');
 
 var ESCAPES = {'n':'\n', 'f':'\f', 'r':'\r', 't':'\t', 'v':'\v', '\'':'\'', '"':'"'};
 
+var CALL = Function.prototype.call;
+var APPLY = Function.prototype.apply;
+var BIND = Function.prototype.bind;
+
 var OPERATORS = {
 	'null': _.constant(null),
 	'true': _.constant(true),
@@ -72,8 +76,10 @@ var OPERATORS = {
 };
 
 var ensureSafeMemberName = function(name) {
-	if (name === 'constructor') {
-		throw 'Referencing "constructor" field in Angular expressions is disallowed!';
+	if (name === 'constructor' || name === '__proto__' ||
+		name === '__defineGetter__' || name === '__defineSetter__' ||
+		name === '__lookupGetter__' || name === '__lookupSetter__') {
+		throw 'Attempting to access a disallowed field in Angular expressions!';
 	}
 };
 
@@ -84,11 +90,24 @@ var ensureSafeObject = function(obj) {
 		} else if (obj.children && (obj.nodeName || (obj.prop && obj.attr && obj.find))) {
 			throw 'Referencing DOM nodes in Angular expressions is disallowed!';
 		} else if (obj.constructor === obj) {
-			throw "Referencing Function in Angular expressions is disallowed!";
+			throw 'Referencing Function in Angular expressions is disallowed!';
+		} else if (obj.getOwnPropertyNames || obj.getOwnPropertyDescriptor) {
+			throw 'Referencing Object in Angular expressions is disallowed!';
 		}
 	}
 	return obj;
 };
+
+var ensureSafeFunction = function (obj) {
+	if (obj) {
+		if (obj.constructor === obj) {
+			throw 'Referencing function in Angular expressions is disallowed!';
+		} else if (obj === CALL || obj === APPLY || obj === BIND) {
+			throw 'Referencing call, apply, or bind in Angular expressions is disallowed!';
+		}
+	}
+	return obj;
+}
 
 var simpleGetterFn1 = function(key) {
 	ensureSafeMemberName(key);
@@ -369,7 +388,6 @@ Lexer.prototype.readIdent = function() {
 	}
 };
 
-
 Lexer.prototype.peek = function(n) {
 	n = n || 1;
 	return this.index + n < this.text.length ?
@@ -380,7 +398,6 @@ Lexer.prototype.peek = function(n) {
 Lexer.prototype.is = function(chs) {
 	return chs.indexOf(this.ch) >= 0;
 };
-
 
 function Parser(lexer) {
 	this.lexer = lexer;
@@ -645,7 +662,7 @@ Parser.prototype.functionCall = function(fnFn, contextFn) {
 	this.consume(')');
 	return function(scope, locals) {
 		var context = ensureSafeObject(contextFn ? contextFn(scope, locals) : scope);
-		var fn = ensureSafeObject(fnFn(scope, locals));
+		var fn = ensureSafeFunction(fnFn(scope, locals));
 		var args = _.map(argFns, function(argFn) { return argFn(scope, locals); });
 		return ensureSafeObject(fn.apply(context, args));
 	};
@@ -674,18 +691,21 @@ Parser.prototype.consume = function(e) {
 	}
 };
 
-
-function parse(expr) {
-	switch (typeof expr) {
-		case 'string':
-			var lexer = new Lexer();
-			var parser = new Parser(lexer);
-			return parser.parse(expr);
-		case 'function':
-			return expr;
-		default:
-			return _.noop;
-	}
+function $ParseProvider() {
+	this.$get = function () {
+		return function (expr) {
+			switch (typeof expr) {
+				case 'string':
+					var lexer = new Lexer();
+					var parser = new Parser(lexer);
+					return parser.parse(expr);
+				case 'function':
+					return expr;
+				default:
+					return _.noop;
+			}
+		};
+	};
 }
 
-module.exports = parse;
+module.exports = $ParseProvider;

@@ -1,10 +1,20 @@
 /* jshint globalstrict: true */
-/* global parse: false */
+/* global publishExternalAPI: false, createInjector, false  */
 'use strict';
-var parse = require('../src/parse');
+
+var createInjector = require('../src/injector');
+var publishExternalAPI = require('../src/angular_public');
 var _ = require('lodash');
 
 describe('parse', function () {
+
+	var parse;
+
+	beforeEach(function () {
+		publishExternalAPI();
+		parse = createInjector(['ng']).get('$parse');
+	});
+
 	it('can parse an integer', function () {
 		var fn = parse('42');
 		expect(fn).to.be.defined;
@@ -422,6 +432,26 @@ describe('parse', function () {
 		}).to.throw;
 	});
 
+	it('does not allow calling functions on Object', function () {
+		var fn = parse('obj.create({})');
+		expect(function () {
+			fn({ obj: Object});
+		}).to.throw;
+	});
+
+	it('does not allow calling call', function() {
+		var fn = parse('fun.call(obj)');
+		expect(function() { fn({fun: function() { }, obj: {}}); }).to.throw;
+	});
+	it('does not allow calling apply', function() {
+		var fn = parse('fun.apply(obj)');
+		expect(function() { fn({fun: function() { }, obj: {}}); }).to.throw;
+	});
+	it('does not allow calling bind', function() {
+		var fn = parse('fun.bind(obj)');
+		expect(function() { fn({fun: function() { }, obj: {}}); }).to.throw;
+	});
+
 	it('parses a simple attribute assignment', function () {
 		var fn = parse('anAttribute = 42');
 		var scope = {};
@@ -701,5 +731,40 @@ describe('parse', function () {
 
 	it('returns the value of the last statement', function() {
 		expect(parse('a = 1; b = 2; a + b')({})).to.equal(3);
+	});
+
+	it('does not allow accessing __proto__', function () {
+		expect(function () {
+			var fn = parse('obj.__proto__');
+			fn({ obj: {}});
+		}).to.throw;
+	});
+
+	it('does not allow calling __defineGetter__', function () {
+		expect(function () {
+			var fn = parse('obj.__defineGetter__("evil", fn)');
+			fn({ obj: {}, fn: function () {} });
+		}).to.throw;
+	});
+
+	it('does not allow calling __defineSetter__', function () {
+		expect(function () {
+			var fn = parse('obj.__defineSetter__("evil", fn)');
+			fn({ obj: {}, fn: function () {} });
+		}).to.throw;
+	});
+
+	it('does not allow calling __lookupGetter__', function () {
+		expect(function () {
+			var fn = parse('obj.__defineSetter__("evil")');
+			fn({ obj: {}, fn: function () {} });
+		}).to.throw;
+	});
+
+	it('does not allow calling __lookupSetter__', function () {
+		expect(function () {
+			var fn = parse('obj.__lookupSetter__("evil")');
+			fn({ obj: {}, fn: function () {} });
+		}).to.throw;
 	});
 });
